@@ -1,0 +1,27 @@
+study_area:
+  province: "Hunan"
+  bounds: [108.47, 24.38, 114.15, 30.08]  # [min_lon, min_lat, max_lon, max_lat]
+  crs: "EPSG:4326"
+
+time_points: [1990, 2005, 2020]
+spatial_resolution: 30  # meters
+
+modules:
+  dic:
+    jenks_breaks: 4
+    indicators: ["PD", "AI", "CONN", "FRAC"]
+  mechanism:
+    gwrf_n_estimators: 500
+    gwrf_max_depth: 15
+    mgwr_bandwidth_method: "golden_section"  # or "equal_interval"
+    shap_samples: 200
+  prediction:
+    scenarios: ["BAU", "Ecological", "Balanced"]
+    markov_steps: 15  # years to 2035
+
+data:
+  dasymetric:
+    nightlight_raster: "data/raw/nightlight_1km.tif"
+    population_raster: "data/raw/population_1km.tif"
+    county_gdp: "data/raw/hunan_gdp_county.csv"
+    county_pop: "data/raw/hunan_pop_county.csv"
