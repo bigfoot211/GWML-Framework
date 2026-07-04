@@ -1,33 +1,39 @@
-# GWML Framework — Complete Code & Data Preprocessing Scripts
+# GWML Framework — Full Source Code \& Data Preprocessing Scripts
 
-以下代码基于参考资料中描述的完整GWML框架实现，包含三大模块：**DIC（Pattern）**、**GNID+GWRF（Mechanism）**、**SA-CA-Markov（Prediction）**，以及数据预处理流程。
+All scripts below implement the integrated GWML framework described in reference literature, consisting of three core functional modules: **DIC \(Pattern Quantification\)**, **GNID \+ GWRF \(Mechanism Decoding\)**, and **SA\-CA\-Markov \(Scenario Forecasting\)**, alongside a full geospatial data preprocessing pipeline\.
 
-## 📁 项目目录结构
+## 📁 Project Directory Structure
 
+```Plain Text
 GWML_Framework/
 ├── data/
-│   ├── raw/                    # 原始数据
-│   ├── processed/              # 预处理后数据
-│   └── indicators/             # 19-indicator system
+│   ├── raw/                    # Raw unprocessed input datasets
+│   ├── processed/              # Cleaned geospatial datasets after preprocessing
+│   └── indicators/             # Storage for the 19-dimensional integrated indicator system
 ├── src/
 │   ├── __init__.py
-│   ├── preprocessing.py        # 数据预处理 + dasymetric mapping
-│   ├── module1_dic.py          # Delta-Index Coupling
-│   ├── module2_mechanism.py    # GNID + GWRF + SHAP
-│   ├── module3_prediction.py   # SA-CA-Markov
-│   └── evaluation.py           # 模型对比评估
+│   ├── preprocessing.py        # Data cleaning workflow + dasymetric spatial disaggregation
+│   ├── module1_dic.py          # Delta-Index Coupling pattern analysis module
+│   ├── module2_mechanism.py    # GNID detector, GWRF model and SHAP interpretability tools
+│   ├── module3_prediction.py   # Scenario-Anchored CA-Markov land use simulation
+│   └── evaluation.py           # Multi-model quantitative benchmark evaluation
 ├── config.yaml
 ├── main.py
 └── requirements.txt
+```
 
-## 📊 关键输出对照表
+## 📊 Core Output Summary Table
 
-| 模块         | 核心输出                  | 关键数值                                  |
-| ------------ | ------------------------- | ----------------------------------------- |
-| DIC          | 4类演化分区               | T1:27.4%, T2:20.1%, T3:37.4%, T4:15.1%    |
-| GWRF         | R²=0.812, Moran's I=0.043 | 优于OLS(0.543), GWR(0.671), RF(0.734)     |
-| MGWR         | 多尺度带宽                | Road:4.2km, GDP:47.6km, Elevation:128.3km |
-| SHAP         | 空间特征重要性            | CZT:GDP(0.31), Xiangxi:Elevation(0.38)    |
-| SA-CA-Markov | 2035情景预测              | S3: +6.8%面积, +0.11连通性, -4.3%人口密度 |
+|Module|Core Output Deliverables|Key Quantitative Results|
+|---|---|---|
+|DIC|Four rural settlement evolution zones|T1:27\.4%, T2:20\.1%, T3:37\.4%, T4:15\.1%|
+|GWRF|Model fitting performance metrics|R²=0\.812, Moran's I=0\.043; outperforms OLS\(0\.543\), GWR\(0\.671\), RF\(0\.734\)|
+|MGWR|Multi\-scale spatial bandwidth parameters|Road network:4\.2km, GDP factor:47\.6km, Elevation:128\.3km|
+|SHAP|Spatially heterogeneous feature importance|CZT urban cluster:GDP \(0\.31\); Xiangxi mountainous zone:Elevation \(0\.38\)|
+|SA\-CA\-Markov|2035 future land use scenario projections|Balanced Scenario \(S3\): \+6\.8% settlement area, \+0\.11 connectivity change, \-4\.3% population density shift|
 
-**使用方式**: 将以上代码保存到对应文件后，运行 `python main.py` 即可执行完整GWML流程。数据文件需按 `config.yaml` 路径放置。
+## Usage Instructions
+
+Save all provided code files to their corresponding paths in the directory structure, then run the command `python main.py` to execute the complete GWML analytical pipeline\. All input geospatial and tabular datasets must be placed under the file paths defined in `config.yaml`\.
+
+> （注：部分内容可能由 AI 生成）
