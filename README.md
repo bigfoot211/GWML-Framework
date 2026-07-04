@@ -36,4 +36,3 @@ GWML_Framework/
 
 Save all provided code files to their corresponding paths in the directory structure, then run the command `python main.py` to execute the complete GWML analytical pipeline\. All input geospatial and tabular datasets must be placed under the file paths defined in `config.yaml`\.
 
-> （注：部分内容可能由 AI 生成）
