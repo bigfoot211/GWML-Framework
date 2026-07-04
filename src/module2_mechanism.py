@@ -1,8 +1,8 @@
 """
-Module 2: Geographically Non-Stationary Interaction Detector (GNID) + 
+Module 2: Geographically Non-Stationary Interaction Detector (GNID) +
           Geographically Weighted Random Forest (GWRF) + SHAP
-          
-核心创新：多尺度空间加权 + 非线性 + 空间可解释
+
+Core Innovations: Multi-scale spatial weighting, non-linear fitting, spatially explicit interpretability
 ^[7]^
 """
 
@@ -21,328 +21,353 @@ warnings.filterwarnings("ignore")
 
 class GeographicallyNonStationaryInteractionDetector:
     """
-    GNID: 扩展Geodetector，产生空间变化的q值表面而非单一数值
+    GNID: Extended Geodetector framework that generates spatially varying q-statistic surfaces
+    instead of a single global coefficient
     ^[8]^
     """
 
-    def __init__(self, n_strata=5):
-        self.n_strata = n_strata
+    def __init__(self, number_strata=5):
+        self.number_strata = number_strata
 
-    def compute_q_surface(self, gdf, factor_col, dependent_col):
+    def calculate_q_surface(self, geodataframe, predictor_column, target_column):
         """
-        计算每个空间位置的q值
-        q = 1 - Σ(Nh * σh²) / (N * σ²)
+        Calculate local q-statistic for every spatial observation
+        Formula: q = 1 - Σ(Nh * σh²) / (N * σ²)
         """
-        n = len(gdf)
-        global_var = gdf[dependent_col].var()
-        q_values = np.zeros(n)
+        total_sample_count = len(geodataframe)
+        global_variance = geodataframe[target_column].var()
+        q_output_array = np.zeros(total_sample_count)
 
-        for i, row in tqdm(gdf.iterrows(), desc="Computing GNID q-surface"):
-            # 以该点为中心，取邻域
-            neighbors = gdf.within(row["geometry"].buffer(5000))  # 5km邻域
-            if neighbors.sum() < 10:
-                q_values[i] = np.nan
+        for index, record in tqdm(geodataframe.iterrows(), desc="Computing GNID local q-surface"):
+            # Extract spatial neighbors within a 5km buffer centered on current observation
+            neighbor_mask = geodataframe.within(record["geometry"].buffer(5000))
+            if neighbor_mask.sum() < 10:
+                q_output_array[index] = np.nan
                 continue
 
-            sub = gdf[neighbors]
-            # 分层
-            sub["stratum"] = pd.qcut(sub[factor_col], self.n_strata, labels=False, duplicates="drop")
+            local_subset = geodataframe[neighbor_mask]
+            # Stratify predictor values into quantile strata
+            local_subset["stratum_label"] = pd.qcut(
+                local_subset[predictor_column],
+                self.number_strata,
+                labels=False,
+                duplicates="drop"
+            )
 
-            within_var = sub.groupby("stratum")[dependent_col].var().mean()
-            q_values[i] = 1 - (within_var / global_var) if global_var > 0 else 0
+            average_within_stratum_variance = local_subset.groupby("stratum_label")[target_column].var().mean()
+            if global_variance > 0:
+                q_output_array[index] = 1 - (average_within_stratum_variance / global_variance)
+            else:
+                q_output_array[index] = 0
 
-        gdf[f"q_{factor_col}"] = q_values
-        return gdf
+        geodataframe[f"q_{predictor_column}"] = q_output_array
+        return geodataframe
 
-    def compute_interaction_q(self, gdf, factor1, factor2, dependent_col):
+    def calculate_interaction_q_surface(self, geodataframe, factor_one, factor_two, target_column):
         """
-        计算空间变化的交互作用q值
+        Compute spatially varying interaction q-statistic for pairwise factor combinations
         ^[9]^
         """
-        gdf["stratum_joint"] = (
-            pd.qcut(gdf[factor1], self.n_strata, labels=False).astype(str) + "_" +
-            pd.qcut(gdf[factor2], self.n_strata, labels=False).astype(str)
+        geodataframe["joint_stratum_id"] = (
+            pd.qcut(geodataframe[factor_one], self.number_strata, labels=False).astype(str)
+            + "_"
+            + pd.qcut(geodataframe[factor_two], self.number_strata, labels=False).astype(str)
         )
 
-        global_var = gdf[dependent_col].var()
-        interaction_q = {}
+        global_variance = geodataframe[target_column].var()
+        interaction_q_storage = {}
 
-        for i, row in tqdm(gdf.iterrows(), desc="Computing interaction q"):
-            neighbors = gdf.within(row["geometry"].buffer(5000))
-            if neighbors.sum() < 10:
+        for index, record in tqdm(geodataframe.iterrows(), desc="Calculating interaction q surfaces"):
+            neighbor_mask = geodataframe.within(record["geometry"].buffer(5000))
+            if neighbor_mask.sum() < 10:
                 continue
-            sub = gdf[neighbors]
-            within_var = sub.groupby("stratum_joint")[dependent_col].var().mean()
-            q = 1 - (within_var / global_var) if global_var > 0 else 0
-            interaction_q[i] = q
+            local_subset = geodataframe[neighbor_mask]
+            average_within_joint_stratum_variance = local_subset.groupby("joint_stratum_id")[target_column].var().mean()
+            if global_variance > 0:
+                local_q_value = 1 - (average_within_joint_stratum_variance / global_variance)
+            else:
+                local_q_value = 0
+            interaction_q_storage[index] = local_q_value
 
-        gdf[f"q_interaction_{factor1}_{factor2}"] = pd.Series(interaction_q)
-        return gdf
+        geodataframe[f"q_interaction_{factor_one}_{factor_two}"] = pd.Series(interaction_q_storage)
+        return geodataframe
 
 
 class GeographicallyWeightedRandomForest:
     """
-    GWRF: 在每个位置拟合独立的RF，使用空间加权样本
-    关键：每个预测变量有自己的最优带宽（MGWR原理）
-    
+    GWRF: Fit independent Random Forest models at each geographic location with spatially weighted samples
+    Core design: Each explanatory variable is assigned an optimized independent bandwidth (MGWR multi-scale logic)
     """
 
-    def __init__(self, n_estimators=500, max_depth=15, bandwidth_method="golden_section"):
-        self.n_estimators = n_estimators
-        self.max_depth = max_depth
-        self.bandwidth_method = bandwidth_method
-        self.models = {}  # 每个位置的RF模型
-        self.bandwidths = {}  # 每个变量的带宽
+    def __init__(self, estimator_count=500, max_tree_depth=15, bandwidth_search_method="golden_section"):
+        self.estimator_count = estimator_count
+        self.max_tree_depth = max_tree_depth
+        self.bandwidth_search_method = bandwidth_search_method
+        self.local_model_dictionary = {}  # Store RF model fitted at each spatial index
+        self.variable_bandwidth_dictionary = {}  # Store optimized bandwidth per explanatory variable
 
-    def _spatial_weights(self, center_point, all_points, bandwidth):
-        """计算空间权重：距离越近权重越大"""
-        dists = all_points.distance(center_point)
-        if bandwidth is None or bandwidth == 0:
-            return np.ones(len(all_points))
-        # 高斯核权重
-        weights = np.exp(-(dists ** 2) / (2 * bandwidth ** 2))
-        return weights
-
-    def fit(self, gdf, feature_cols, target_col, bandwidths=None):
+    def _compute_gaussian_spatial_weights(self, center_geometry, all_geometries, bandwidth_radius):
         """
-        在每个位置拟合空间加权RF
-        
-        Parameters:
-        -----------
-        gdf : GeoDataFrame
-        feature_cols : list, 预测变量列名
-        target_col : str, 因变量列名
-        bandwidths : dict, 每个变量的带宽 {var: bandwidth_km}
-                    如果为None，则用MGWR自动选择
+        Generate spatial kernel weights: higher weight assigned to geographically closer observations
+        Implements Gaussian distance decay kernel
         """
-        print(f"🔧 Fitting GWRF at {len(gdf)} locations...")
+        distance_array = all_geometries.distance(center_geometry)
+        if bandwidth_radius is None or bandwidth_radius == 0:
+            return np.ones(len(all_geometries))
+        gaussian_weights = np.exp(-(distance_array ** 2) / (2 * bandwidth_radius ** 2))
+        return gaussian_weights
 
-        if bandwidths is None:
-            # 使用MGWR自动选择多尺度带宽
-            bandwidths = self._mgwr_bandwidth_selection(gdf, feature_cols, target_col)
+    def fit_global_workflow(self, geodataframe, feature_column_list, target_variable_column, predefined_bandwidths=None):
+        """
+        Fit spatially weighted Random Forest model at every observation location
 
-        self.bandwidths = bandwidths
+        Parameters
+        ----------
+        geodataframe : GeoDataFrame
+            Input geospatial dataset containing features, target variable and geometry
+        feature_column_list : list[str]
+            List of column names for explanatory predictor variables
+        target_variable_column : str
+            Column name of dependent response variable
+        predefined_bandwidths : dict | None
+            Custom bandwidth mapping formatted as {variable_name: bandwidth_kilometers}
+            If None, multi-scale bandwidths are auto-selected via MGWR
+        """
+        print(f"🔧 Initializing GWRF fitting over {len(geodataframe)} spatial locations...")
 
-        for idx, row in tqdm(gdf.iterrows(), total=len(gdf), desc="GWRF fitting"):
-            center = row["geometry"].centroid
+        if predefined_bandwidths is None:
+            # Auto-calibrate multi-scale bandwidths via MGWR bandwidth selector
+            predefined_bandwidths = self._mgwr_bandwidth_calibration(geodataframe, feature_column_list, target_variable_column)
 
-            # 计算空间权重
-            weights = self._spatial_weights(center, gdf["geometry"], bandwidths["default"])
+        self.variable_bandwidth_dictionary = predefined_bandwidths
 
-            # 加权采样
-            X = gdf[feature_cols].values
-            y = gdf[target_col].values
+        for spatial_index, record in tqdm(geodataframe.iterrows(), total=len(geodataframe), desc="GWRF Local Model Fitting"):
+            central_point = record["geometry"].centroid
+            # Generate spatial weight vector for local sample weighting
+            local_weight_vector = self._compute_gaussian_spatial_weights(central_point, geodataframe["geometry"], predefined_bandwidths["default"])
 
-            # 拟合加权RF
-            rf = RandomForestRegressor(
-                n_estimators=self.n_estimators,
-                max_depth=self.max_depth,
+            feature_matrix = geodataframe[feature_column_list].values
+            target_vector = geodataframe[target_variable_column].values
+
+            # Train weighted random forest regressor
+            local_rf_model = RandomForestRegressor(
+                n_estimators=self.estimator_count,
+                max_depth=self.max_tree_depth,
                 random_state=42,
                 n_jobs=-1
             )
-            rf.fit(X, y, sample_weight=weights)
-            self.models[idx] = rf
+            local_rf_model.fit(feature_matrix, target_vector, sample_weight=local_weight_vector)
+            self.local_model_dictionary[spatial_index] = local_rf_model
 
-        print(f"✅ GWRF fitted. Bandwidths: {bandwidths}")
+        print(f"✅ GWRF training complete. Optimized bandwidth outputs: {predefined_bandwidths}")
         return self
 
-    def _mgwr_bandwidth_selection(self, gdf, feature_cols, target_col):
-        """使用MGWR选择多尺度带宽"""
-        coords = np.array([[geom.centroid.x, geom.centroid.y] for geom in gdf["geometry"]])
-        X = gdf[feature_cols].values
-        y = gdf[target_col].values
+    def _mgwr_bandwidth_calibration(self, geodataframe, feature_column_list, target_variable_column):
+        """Automatically select multi-scale bandwidth parameters using MGWR bandwidth search algorithm"""
+        coordinate_matrix = np.array([[geom.centroid.x, geom.centroid.y] for geom in geodataframe["geometry"]])
+        feature_matrix = geodataframe[feature_column_list].values
+        target_vector = geodataframe[target_variable_column].values
 
-        # 使用MGWR的带宽选择
-        selector = Sel_BW(coords, y, X, kernel="gaussian", fixed=False)
+        bandwidth_selector = Sel_BW(coordinate_matrix, target_vector, feature_matrix, kernel="gaussian", fixed=False)
 
-        if self.bandwidth_method == "golden_section":
-            bw = selector.search(bw_min=2, bw_max=200, criterion="AICc", verbose=False)
+        if self.bandwidth_search_method == "golden_section":
+            optimal_bandwidth_array = bandwidth_selector.search(bw_min=2, bw_max=200, criterion="AICc", verbose=False)
         else:
-            bw = selector.search(bw_min=2, bw_max=200, criterion="AICc", verbose=False)
+            optimal_bandwidth_array = bandwidth_selector.search(bw_min=2, bw_max=200, criterion="AICc", verbose=False)
 
-        # 提取每个变量的带宽
-        bandwidths = {"default": bw[0]}  # 全局带宽
-        for i, col in enumerate(feature_cols):
-            bandwidths[col] = bw[i + 1] if i + 1 < len(bw) else bw[0]
-
-        print(f"📏 MGWR Bandwidths: {bandwidths}")
-        return bandwidths
-
-    def predict(self, gdf, feature_cols):
-        """预测"""
-        preds = []
-        for idx, row in gdf.iterrows():
-            if idx in self.models:
-                pred = self.models[idx].predict(row[feature_cols].values.reshape(1, -1))[0]
+        # Map bandwidth values to corresponding variables
+        bandwidth_output = {"default": optimal_bandwidth_array[0]}
+        for var_index, column_name in enumerate(feature_column_list):
+            if var_index + 1 < len(optimal_bandwidth_array):
+                bandwidth_output[column_name] = optimal_bandwidth_array[var_index + 1]
             else:
-                pred = np.nan
-            preds.append(pred)
-        return np.array(preds)
+                bandwidth_output[column_name] = optimal_bandwidth_array[0]
 
-    def get_feature_importance(self, gdf, feature_cols, n_samples=200):
+        print(f"📏 MGWR Calibrated Multi-Scale Bandwidths: {bandwidth_output}")
+        return bandwidth_output
+
+    def generate_local_predictions(self, geodataframe, feature_column_list):
+        """Generate predicted target values using location-specific trained RF models"""
+        prediction_storage = []
+        for spatial_index, record in geodataframe.iterrows():
+            if spatial_index in self.local_model_dictionary:
+                single_prediction = self.local_model_dictionary[spatial_index].predict(record[feature_column_list].values.reshape(1, -1))[0]
+            else:
+                single_prediction = np.nan
+            prediction_storage.append(single_prediction)
+        return np.array(prediction_storage)
+
+    def compute_spatial_shap_importance(self, geodataframe, feature_column_list, sample_capacity=200):
         """
-        使用SHAP获取空间变化的特征重要性
+        Calculate spatially heterogeneous feature importance metrics via SHAP TreeExplainer
         ^[10]^
         """
-        print("📊 Computing SHAP values...")
+        print("📊 Calculating SHAP explanatory values for local model interpretability...")
 
-        shap_values_list = []
+        shap_value_collection = []
+        # Randomly sample spatial locations to reduce computational overhead
+        sampled_indices = np.random.choice(len(geodataframe), min(sample_capacity, len(geodataframe)), replace=False)
 
-        # 采样位置计算SHAP
-        sample_idx = np.random.choice(len(gdf), min(n_samples, len(gdf)), replace=False)
+        for spatial_index in tqdm(sampled_indices, desc="SHAP Value Calculation"):
+            trained_local_model = self.local_model_dictionary[spatial_index]
+            sampled_feature_submatrix = geodataframe.loc[sampled_indices, feature_column_list].values
 
-        for idx in tqdm(sample_idx, desc="SHAP computation"):
-            model = self.models[idx]
-            X_sample = gdf.loc[sample_idx, feature_cols].values
+            shap_explainer = shap.TreeExplainer(trained_local_model)
+            shap_matrix = shap_explainer.shap_values(sampled_feature_submatrix)
 
-            explainer = shap.TreeExplainer(model)
-            shap_vals = explainer.shap_values(X_sample)
+            # Store mean absolute SHAP values as local feature importance
+            shap_value_collection.append(np.abs(shap_matrix).mean(axis=0))
 
-            shap_values_list.append(np.abs(shap_vals).mean(axis=0))
-
-        shap_df = pd.DataFrame(
-            shap_values_list,
-            columns=feature_cols,
-            index=gdf.loc[sample_idx].index
+        shap_importance_dataframe = pd.DataFrame(
+            shap_value_collection,
+            columns=feature_column_list,
+            index=geodataframe.loc[sampled_indices].index
         )
+        return shap_importance_dataframe
 
-        return shap_df
 
-
-def compare_models(gdf, feature_cols, target_col):
+def run_benchmark_model_comparison(geodataframe, feature_column_list, target_variable_column):
     """
-    模型对比：OLS, GWR, RF, Geodetector, GWRF, GNID
+    Spatial regression model benchmark comparison workflow: OLS, GWR, RF, Geodetector, GWRF, GNID
     ^[11]^
-    
-    | Model | R² | RMSE | Moran's I | Kappa |
-    | OLS | 0.543 | 1.892 | 0.312 | 0.456 |
-    | GWR | 0.671 | 1.523 | 0.187 | 0.589 |
-    | RF | 0.734 | 1.387 | N/A | 0.634 |
-    | GWRF | 0.812 | 1.156 | 0.043 | 0.789 |
+
+    | Model  | R²    | RMSE  | Moran's I | Kappa |
+    | OLS    | 0.543 | 1.892 | 0.312     | 0.456 |
+    | GWR    | 0.671 | 1.523 | 0.187     | 0.589 |
+    | RF     | 0.734 | 1.387 | N/A       | 0.634 |
+    | GWRF   | 0.812 | 1.156 | 0.043     | 0.789 |
     """
     from sklearn.linear_model import LinearRegression
     from sklearn.metrics import r2_score, mean_squared_error
     from pysal.explore import esda
     from pysal.lib import weights
 
-    X = gdf[feature_cols].values
-    y = gdf[target_col].values
-    coords = np.array([[geom.centroid.x, geom.centroid.y] for geom in gdf["geometry"]])
+    feature_matrix = geodataframe[feature_column_list].values
+    target_vector = geodataframe[target_variable_column].values
+    coordinate_matrix = np.array([[geom.centroid.x, geom.centroid.y] for geom in geodataframe["geometry"]])
 
-    results = {}
+    benchmark_results_dictionary = {}
 
-    # 1. OLS
-    ols = LinearRegression()
-    ols.fit(X, y)
-    y_pred_ols = ols.predict(X)
-    results["OLS"] = {
-        "R2": r2_score(y, y_pred_ols),
-        "RMSE": np.sqrt(mean_squared_error(y, y_pred_ols)),
-        "Moran_I": _compute_moran_i(y - y_pred_ols, coords),
-        "Kappa": _compute_kappa(y, y_pred_ols)
+    # 1. Global Ordinary Least Squares (OLS) Regression
+    ols_model = LinearRegression()
+    ols_model.fit(feature_matrix, target_vector)
+    ols_prediction_vector = ols_model.predict(feature_matrix)
+    benchmark_results_dictionary["OLS"] = {
+        "R2": r2_score(target_vector, ols_prediction_vector),
+        "RMSE": np.sqrt(mean_squared_error(target_vector, ols_prediction_vector)),
+        "Moran_I": _calculate_residual_moran_i(target_vector - ols_prediction_vector, coordinate_matrix),
+        "Kappa": _simplified_cohen_kappa(target_vector, ols_prediction_vector)
     }
 
-    # 2. GWR (using mgwr)
+    # 2. Geographically Weighted Regression (GWR)
     from mgwr.gwr import GWR
-    gwr_selector = Sel_BW(coords, y, X)
-    gwr_bw = gwr_selector.search(criterion="AICc")
-    gwr_model = GWR(coords, y, X, bw=gwr_bw, kernel="gaussian", fixed=False)
-    gwr_results = gwr_model.fit()
-    y_pred_gwr = gwr_results.predy
-    results["GWR"] = {
-        "R2": r2_score(y, y_pred_gwr),
-        "RMSE": np.sqrt(mean_squared_error(y, y_pred_gwr)),
-        "Moran_I": _compute_moran_i(y - y_pred_gwr, coords),
-        "Kappa": _compute_kappa(y, y_pred_gwr)
+    gwr_bandwidth_selector = Sel_BW(coordinate_matrix, target_vector, feature_matrix)
+    gwr_optimal_bandwidth = gwr_bandwidth_selector.search(criterion="AICc")
+    gwr_regression_model = GWR(coordinate_matrix, target_vector, feature_matrix, bw=gwr_optimal_bandwidth, kernel="gaussian", fixed=False)
+    gwr_fitting_output = gwr_regression_model.fit()
+    gwr_prediction_vector = gwr_fitting_output.predy
+    benchmark_results_dictionary["GWR"] = {
+        "R2": r2_score(target_vector, gwr_prediction_vector),
+        "RMSE": np.sqrt(mean_squared_error(target_vector, gwr_prediction_vector)),
+        "Moran_I": _calculate_residual_moran_i(target_vector - gwr_prediction_vector, coordinate_matrix),
+        "Kappa": _simplified_cohen_kappa(target_vector, gwr_prediction_vector)
     }
 
-    # 3. RF
-    rf = RandomForestRegressor(n_estimators=500, max_depth=15, random_state=42)
-    rf.fit(X, y)
-    y_pred_rf = rf.predict(X)
-    results["RF"] = {
-        "R2": r2_score(y, y_pred_rf),
-        "RMSE": np.sqrt(mean_squared_error(y, y_pred_rf)),
+    # 3. Global Random Forest (RF)
+    global_rf_model = RandomForestRegressor(n_estimators=500, max_depth=15, random_state=42)
+    global_rf_model.fit(feature_matrix, target_vector)
+    rf_prediction_vector = global_rf_model.predict(feature_matrix)
+    benchmark_results_dictionary["RF"] = {
+        "R2": r2_score(target_vector, rf_prediction_vector),
+        "RMSE": np.sqrt(mean_squared_error(target_vector, rf_prediction_vector)),
         "Moran_I": np.nan,
-        "Kappa": _compute_kappa(y, y_pred_rf)
+        "Kappa": _simplified_cohen_kappa(target_vector, rf_prediction_vector)
     }
 
-    # 4. GWRF
-    gwrf = GeographicallyWeightedRandomForest(n_estimators=500, max_depth=15)
-    gwrf.fit(gdf, feature_cols, target_col)
-    y_pred_gwrf = gwrf.predict(gdf, feature_cols)
-    results["GWRF"] = {
-        "R2": r2_score(y, y_pred_gwrf),
-        "RMSE": np.sqrt(mean_squared_error(y, y_pred_gwrf)),
-        "Moran_I": _compute_moran_i(y - y_pred_gwrf, coords),
-        "Kappa": _compute_kappa(y, y_pred_gwrf)
+    # 4. Geographically Weighted Random Forest (GWRF)
+    gwrf_benchmark_model = GeographicallyWeightedRandomForest(estimator_count=500, max_tree_depth=15)
+    gwrf_benchmark_model.fit_global_workflow(geodataframe, feature_column_list, target_variable_column)
+    gwrf_prediction_vector = gwrf_benchmark_model.generate_local_predictions(geodataframe, feature_column_list)
+    benchmark_results_dictionary["GWRF"] = {
+        "R2": r2_score(target_vector, gwrf_prediction_vector),
+        "RMSE": np.sqrt(mean_squared_error(target_vector, gwrf_prediction_vector)),
+        "Moran_I": _calculate_residual_moran_i(target_vector - gwrf_prediction_vector, coordinate_matrix),
+        "Kappa": _simplified_cohen_kappa(target_vector, gwrf_prediction_vector)
     }
 
-    # 5. GNID
-    gnid = GeographicallyNonStationaryInteractionDetector(n_strata=5)
-    gdf_gnid = gnid.compute_q_surface(gdf, feature_cols[0], target_col)
-    # 简化：用q值加权预测
-    results["GNID"] = {
-        "R2": 0.778,  # from paper
+    # 5. Geographically Non-Stationary Interaction Detector (GNID)
+    gnid_benchmark_model = GeographicallyNonStationaryInteractionDetector(number_strata=5)
+    gnid_processed_gdf = gnid_benchmark_model.calculate_q_surface(geodataframe, feature_column_list[0], target_variable_column)
+    # Predefined benchmark metrics extracted from reference literature
+    benchmark_results_dictionary["GNID"] = {
+        "R2": 0.778,
         "RMSE": 1.234,
         "Moran_I": 0.067,
         "Kappa": 0.745
     }
 
-    # 打印对比表
+    # Print formatted benchmark comparison table
     print("\n" + "="*70)
     print(f"{'Model':<10} {'R²':<8} {'RMSE':<8} {'Moran I':<10} {'Kappa':<8}")
     print("="*70)
-    for model, metrics in results.items():
-        mi = f"{metrics['Moran_I']:.3f}" if not np.isnan(metrics["Moran_I"]) else "N/A"
-        print(f"{model:<10} {metrics['R2']:<8.3f} {metrics['RMSE']:<8.3f} {mi:<10} {metrics['Kappa']:<8.3f}")
+    for model_label, metric_dict in benchmark_results_dictionary.items():
+        if np.isnan(metric_dict["Moran_I"]):
+            moran_text = "N/A"
+        else:
+            moran_text = f"{metric_dict['Moran_I']:.3f}"
+        print(f"{model_label:<10} {metric_dict['R2']:<8.3f} {metric_dict['RMSE']:<8.3f} {moran_text:<10} {metric_dict['Kappa']:<8.3f}")
     print("="*70)
-    print(f"")
+    print("")
 
-    return results
-
-
-def _compute_moran_i(residuals, coords, k=8):
-    """计算残差的Moran's I"""
-    w = weights.KNN.from_array(coords, k=k)
-    w.transform = "r"
-    moran = esda.Moran(residuals, w)
-    return moran.I
+    return benchmark_results_dictionary
 
 
-def _compute_kappa(y_true, y_pred, n_bins=5):
-    """简化的Kappa系数"""
-    y_true_bins = pd.qcut(y_true, n_bins, labels=False, duplicates="drop")
-    y_pred_bins = pd.qcut(y_pred, n_bins, labels=False, duplicates="drop")
-    agreement = (y_true_bins == y_pred_bins).mean()
-    # 简化计算
-    return min(agreement * 2, 1.0)
+def _calculate_residual_moran_i(residual_vector, coordinate_matrix, k_neighbors=8):
+    """Compute Moran's I statistic for model residual spatial autocorrelation test"""
+    knn_weight_matrix = weights.KNN.from_array(coordinate_matrix, k=k_neighbors)
+    knn_weight_matrix.transform = "r"
+    moran_statistic_output = esda.Moran(residual_vector, knn_weight_matrix)
+    return moran_statistic_output.I
+
+
+def _simplified_cohen_kappa(true_values, predicted_values, bin_count=5):
+    """Simplified categorical Cohen's Kappa calculation via quantile discretization"""
+    true_discrete_bins = pd.qcut(true_values, bin_count, labels=False, duplicates="drop")
+    pred_discrete_bins = pd.qcut(predicted_values, bin_count, labels=False, duplicates="drop")
+    raw_agreement_rate = (true_discrete_bins == pred_discrete_bins).mean()
+    # Cap maximum kappa output at 1.0
+    return min(raw_agreement_rate * 2, 1.0)
 
 
 if __name__ == "__main__":
-    villages = gpd.read_file("data/processed/villages_with_indicators.gpkg")
+    village_spatial_dataset = gpd.read_file("data/processed/villages_with_indicators.gpkg")
 
-    feature_cols = [
-        "road_density", "dist_to_county_center", "per_capita_gdp",
-        "elevation", "pop_density", "dist_to_rivers",
-        "cultivated_ratio", "secondary_tertiary_ratio"
+    explanatory_feature_columns = [
+        "road_density",
+        "dist_to_county_center",
+        "per_capita_gdp",
+        "elevation",
+        "pop_density",
+        "dist_to_rivers",
+        "cultivated_ratio",
+        "secondary_tertiary_ratio"
     ]
-    target_col = "settlement_area_change"
+    response_target_column = "settlement_area_change"
 
-    # 模型对比
-    results = compare_models(villages, feature_cols, target_col)
+    # Execute cross-model benchmark evaluation
+    benchmark_output_metrics = run_benchmark_model_comparison(village_spatial_dataset, explanatory_feature_columns, response_target_column)
 
-    # 运行GWRF
-    gwrf = GeographicallyWeightedRandomForest(n_estimators=500, max_depth=15)
-    gwrf.fit(villages, feature_cols, target_col)
+    # Train full GWRF model
+    gwrf_main_model = GeographicallyWeightedRandomForest(estimator_count=500, max_tree_depth=15)
+    gwrf_main_model.fit_global_workflow(village_spatial_dataset, explanatory_feature_columns, response_target_column)
 
-    # SHAP空间解释
-    shap_importance = gwrf.get_feature_importance(villages, feature_cols, n_samples=200)
-    print("\n📊 Spatially Varying Feature Importance (SHAP):")
-    print(shap_importance.mean().sort_values(ascending=False))
-    print(f"")
+    # Spatially heterogeneous SHAP interpretability analysis
+    spatial_shap_importance_df = gwrf_main_model.compute_spatial_shap_importance(village_spatial_dataset, explanatory_feature_columns, sample_capacity=200)
+    print("\n📊 Spatially Varying Mean Feature Importance (SHAP Absolute Values):")
+    print(spatial_shap_importance_df.mean().sort_values(ascending=False))
+    print("")
 
-    # 多尺度带宽分析
-    print(f"\n📏 Multiscale Bandwidths (MGWR):")
-    print(gwrf.bandwidths)
-    print(f"")
+    # Output MGWR multi-scale bandwidth calibration results
+    print(f"\n📏 Optimized Variable-Specific Bandwidths from MGWR:")
+    print(gwrf_main_model.variable_bandwidth_dictionary)
+    print("")

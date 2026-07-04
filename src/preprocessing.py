@@ -1,6 +1,6 @@
 """
-数据预处理模块：包含dasymetric mapping将县级社会经济数据 disaggregate 到村级
-基于 GeoRRDI Framework (2025)^[3]^
+Data Preprocessing Module: Includes dasymetric mapping to disaggregate county-level socioeconomic data to village units
+Based on the GeoRRDI Framework (2025)^[3]^
 """
 
 import numpy as np
@@ -15,189 +15,213 @@ import yaml
 
 class DasymetricMapper:
     """
-    将县级GDP、人口密度等数据通过dasymetric mapping分配到村级
-    使用1km分辨率夜间灯光和人口栅格作为辅助信息
+    Disaggregate county-level GDP, population density and other socioeconomic metrics down to village scale via dasymetric mapping
+    Uses 1km resolution nighttime light and population raster datasets as ancillary weighting layers
     """
 
-    def __init__(self, config_path="config.yaml"):
-        with open(config_path) as f:
-            self.cfg = yaml.safe_load(f)
+    def __init__(self, config_file_path="config.yaml"):
+        with open(config_file_path, mode="r") as config_file:
+            self.config_dict = yaml.safe_load(config_file)
 
-    def load_ancillary_rasters(self):
-        """加载辅助栅格：夜间灯光 + 人口密度"""
-        self.nightlight = rasterio.open(self.cfg["data"]["dasymetric"]["nightlight_raster"])
-        self.population = rasterio.open(self.cfg["data"]["dasymetric"]["population_raster"])
+    def load_ancillary_raster_datasets(self):
+        """Load auxiliary raster inputs: nighttime light intensity and population density grids"""
+        self.nightlight_raster_reader = rasterio.open(self.config_dict["data"]["dasymetric"]["nightlight_raster"])
+        self.population_raster_reader = rasterio.open(self.config_dict["data"]["dasymetric"]["population_raster"])
 
-        # 统一分辨率为1km
-        self.nightlight_data = self.nightlight.read(1)
-        self.pop_data = self.population.read(1)
+        # Standardize spatial resolution to 1 kilometer
+        self.nightlight_raw_data = self.nightlight_raster_reader.read(1)
+        self.population_raw_data = self.population_raster_reader.read(1)
 
-        # 归一化辅助变量
-        scaler = MinMaxScaler()
-        self.nightlight_norm = scaler.fit_transform(
-            self.nightlight_data.reshape(-1, 1)
-        ).reshape(self.nightlight_data.shape)
-        self.pop_norm = scaler.fit_transform(
-            self.pop_data.reshape(-1, 1)
-        ).reshape(self.pop_data.shape)
+        # Min-max normalization of auxiliary weighting variables
+        minmax_scaler = MinMaxScaler()
+        self.nightlight_normalized = minmax_scaler.fit_transform(
+            self.nightlight_raw_data.reshape(-1, 1)
+        ).reshape(self.nightlight_raw_data.shape)
 
-        # 组合权重：夜间灯光60% + 人口40%
-        self.weight_raster = 0.6 * self.nightlight_norm + 0.4 * self.pop_norm
-        self.weight_raster = self.weight_raster / self.weight_raster.sum()
+        self.population_normalized = minmax_scaler.fit_transform(
+            self.population_raw_data.reshape(-1, 1)
+        ).reshape(self.population_raw_data.shape)
 
-    def disaggregate_county_to_village(self, county_gdp_path, county_pop_path, village_gdf):
+        # Composite weighting layer: 60% nighttime light + 40% population grid
+        self.composite_weight_raster = 0.6 * self.nightlight_normalized + 0.4 * self.population_normalized
+        self.composite_weight_raster = self.composite_weight_raster / self.composite_weight_raster.sum()
+
+    def disaggregate_county_statistics_to_villages(self, county_gdp_csv_path, county_pop_csv_path, village_boundary_gdf):
         """
-        将县级GDP和人口密度分配到村级
-        
-        Parameters:
-        -----------
-        county_gdp_path : str, 县级GDP CSV
-        county_pop_path : str, 县级人口 CSV
-        village_gdf : GeoDataFrame, 村级边界
-        
-        Returns:
-        --------
-        village_gdf : GeoDataFrame, 添加了disaggregated GDP和人口密度
+        Distribute aggregated county-level GDP and population density values to individual village polygons
+
+        Parameters
+        ----------
+        county_gdp_csv_path : str
+            File path to CSV containing county GDP records
+        county_pop_csv_path : str
+            File path to CSV containing county population statistics
+        village_boundary_gdf : GeoDataFrame
+            Geospatial dataset with village administrative boundaries
+
+        Returns
+        -------
+        GeoDataFrame
+            Original village boundary dataset appended with disaggregated village-level GDP and population density metrics
         """
-        # 加载县级数据
-        county_gdp = pd.read_csv(county_gdp_path)  # columns: county_id, gdp_per_capita
-        county_pop = pd.read_csv(county_pop_path)   # columns: county_id, pop_density
+        # Import county aggregated socioeconomic tables
+        county_gdp_dataset = pd.read_csv(county_gdp_csv_path)  # Fields: county_id, gdp_per_capita
+        county_pop_dataset = pd.read_csv(county_pop_csv_path)   # Fields: county_id, pop_density
 
-        # 空间连接：村庄 -> 所属县
-        village_gdf = village_gdf.merge(
-            county_gdp[["county_id", "gdp_per_capita"]],
-            on="county_id", how="left"
+        # Spatial attribute join: match each village to its parent administrative county
+        village_boundary_gdf = village_boundary_gdf.merge(
+            county_gdp_dataset[["county_id", "gdp_per_capita"]],
+            on="county_id",
+            how="left"
         )
-        village_gdf = village_gdf.merge(
-            county_pop[["county_id", "pop_density"]],
-            on="county_id", how="left"
-        )
-
-        # 计算每个村庄的权重
-        village_gdf["dasymetric_weight"] = village_gdf.apply(
-            self._calculate_village_weight, axis=1
+        village_boundary_gdf = village_boundary_gdf.merge(
+            county_pop_dataset[["county_id", "pop_density"]],
+            on="county_id",
+            how="left"
         )
 
-        # 分配GDP和人口密度
-        village_gdf["gdp_per_capita_village"] = (
-            village_gdf["gdp_per_capita"] * village_gdf["dasymetric_weight"]
-        )
-        village_gdf["pop_density_village"] = (
-            village_gdf["pop_density"] * village_gdf["dasymetric_weight"]
+        # Calculate dasymetric weighting coefficient for every village unit
+        village_boundary_gdf["dasymetric_weight_coefficient"] = village_boundary_gdf.apply(
+            self._calculate_single_village_weight,
+            axis=1
         )
 
-        return village_gdf
+        # Distribute county aggregated metrics to village scale using spatial weights
+        village_boundary_gdf["village_gdp_per_capita"] = (
+            village_boundary_gdf["gdp_per_capita"] * village_boundary_gdf["dasymetric_weight_coefficient"]
+        )
+        village_boundary_gdf["village_population_density"] = (
+            village_boundary_gdf["pop_density"] * village_boundary_gdf["dasymetric_weight_coefficient"]
+        )
 
-    def _calculate_village_weight(self, row):
-        """计算单个村庄的dasymetric权重"""
-        geom = row["geometry"]
-        bounds = geom.bounds  # (minx, miny, maxx, maxy)
+        return village_boundary_gdf
 
-        # 从栅格中提取该村庄范围内的权重值
-        window = rasterio.windows.from_bounds(*bounds, self.nightlight.transform)
-        w = self.weight_raster[
-            int(window.row_off):int(window.row_off + window.height),
-            int(window.col_off):int(window.col_off + window.width)
+    def _calculate_single_village_weight(self, record_row):
+        """Compute dasymetric weighting value for one individual village polygon"""
+        village_geometry = record_row["geometry"]
+        min_x, min_y, max_x, max_y = village_geometry.bounds
+
+        # Extract raster pixel values overlapping the village boundary extent
+        extraction_window = rasterio.windows.from_bounds(
+            min_x, min_y, max_x, max_y,
+            self.nightlight_raster_reader.transform
+        )
+        window_pixel_matrix = self.composite_weight_raster[
+            int(extraction_window.row_off): int(extraction_window.row_off + extraction_window.height),
+            int(extraction_window.col_off): int(extraction_window.col_off + extraction_window.width)
         ]
-        return w.sum() / w.size  # 归一化
+        return window_pixel_matrix.sum() / window_pixel_matrix.size  # Area-normalized weight
 
-    def build_19_indicator_system(self, village_gdf, dem_path, road_path, river_path):
+    def construct_nineteen_indicator_system(self, village_gdf, dem_file_path, road_raster_path, river_raster_path):
         """
-        构建19指标体系：生态环境、土地利用结构、聚落动态、公共服务可达性
+        Build integrated system of 19 explanatory indicators covering four categories:
+        eco-environmental metrics, land use composition, settlement dynamics, public service accessibility
         ^[4]^
         """
-        indicators = {}
+        indicator_storage_dict = {}
 
-        # === 生态环境指标 (4个) ===
-        with rasterio.open(dem_path) as src:
-            dem = src.read(1)
-            transform = src.transform
-            indicators["elevation"] = self._zonal_stats(village_gdf, dem, transform, "mean")
-            indicators["slope"] = self._calc_slope(dem, transform)
+        # ========== Eco-Environmental Indicators (4 total) ==========
+        with rasterio.open(dem_file_path) as dem_reader:
+            dem_grid = dem_reader.read(1)
+            raster_transform_matrix = dem_reader.transform
+            indicator_storage_dict["elevation_mean"] = self._compute_zonal_statistic(
+                village_gdf, dem_grid, raster_transform_matrix, stat_method="mean"
+            )
+            indicator_storage_dict["slope_mean_degree"] = self._generate_slope_raster(dem_grid, raster_transform_matrix)
 
-        with rasterio.open(road_path) as src:
-            road_raster = src.read(1)
-            indicators["road_density"] = self._zonal_stats(village_gdf, road_raster, transform, "sum")
+        with rasterio.open(road_raster_path) as road_reader:
+            road_intensity_grid = road_reader.read(1)
+            indicator_storage_dict["road_network_density"] = self._compute_zonal_statistic(
+                village_gdf, road_intensity_grid, raster_transform_matrix, stat_method="sum"
+            )
 
-        with rasterio.open(river_path) as src:
-            river_raster = src.read(1)
-            indicators["dist_to_river"] = self._zonal_stats(village_gdf, river_raster, transform, "mean")
+        with rasterio.open(river_raster_path) as river_reader:
+            river_distance_grid = river_reader.read(1)
+            indicator_storage_dict["mean_distance_to_river"] = self._compute_zonal_statistic(
+                village_gdf, river_distance_grid, raster_transform_matrix, stat_method="mean"
+            )
 
-        # === 土地利用结构指标 (5个) ===
-        indicators["cultivated_ratio"] = village_gdf["cultivated_area"] / village_gdf["total_area"]
-        indicators["forest_ratio"] = village_gdf["forest_area"] / village_gdf["total_area"]
-        indicators["water_ratio"] = village_gdf["water_area"] / village_gdf["total_area"]
-        indicators["builtup_ratio"] = village_gdf["builtup_area"] / village_gdf["total_area"]
-        indicators["secondary_tertiary_ratio"] = village_gdf["secondary_tertiary_emp"] / village_gdf["total_emp"]
+        # ========== Land Use Composition Indicators (5 total) ==========
+        indicator_storage_dict["cultivated_land_ratio"] = village_gdf["cultivated_area"] / village_gdf["total_village_area"]
+        indicator_storage_dict["forest_land_ratio"] = village_gdf["forest_area"] / village_gdf["total_village_area"]
+        indicator_storage_dict["water_body_ratio"] = village_gdf["water_area"] / village_gdf["total_village_area"]
+        indicator_storage_dict["built_up_ratio"] = village_gdf["builtup_area"] / village_gdf["total_village_area"]
+        indicator_storage_dict["secondary_tertiary_employment_ratio"] = village_gdf["secondary_tertiary_emp"] / village_gdf["total_employment"]
 
-        # === 聚落动态指标 (5个) ===
-        indicators["patch_density"] = village_gdf["n_patches"] / village_gdf["total_area"]
-        indicators["aggregation_index"] = village_gdf["ai"]
-        indicators["connectivity"] = village_gdf["connectivity"]
-        indicators["fractal_dimension"] = village_gdf["fractal_dim"]
-        indicators["pop_change_rate"] = village_gdf["pop_2020"] / village_gdf["pop_1990"] - 1
+        # ========== Settlement Landscape Dynamic Indicators (5 total) ==========
+        indicator_storage_dict["patch_density"] = village_gdf["patch_count"] / village_gdf["total_village_area"]
+        indicator_storage_dict["aggregation_index"] = village_gdf["aggregation_index"]
+        indicator_storage_dict["landscape_connectivity"] = village_gdf["connectivity_metric"]
+        indicator_storage_dict["mean_fractal_dimension"] = village_gdf["fractal_dim"]
+        indicator_storage_dict["population_change_rate"] = village_gdf["pop_2020"] / village_gdf["pop_1990"] - 1
 
-        # === 公共服务可达性指标 (5个) ===
-        indicators["dist_to_county_center"] = village_gdf["dist_county_center"]
-        indicators["dist_to_prefecture"] = village_gdf["dist_prefecture"]
-        indicators["dist_to_provincial_road"] = village_gdf["dist_prov_road"]
-        indicators["school_density"] = village_gdf["n_schools"] / village_gdf["total_area"]
-        indicators["clinic_density"] = village_gdf["n_clinics"] / village_gdf["total_area"]
+        # ========== Public Service Accessibility Indicators (5 total) ==========
+        indicator_storage_dict["distance_to_county_admin_center"] = village_gdf["dist_county_center"]
+        indicator_storage_dict["distance_to_prefecture_city"] = village_gdf["dist_prefecture"]
+        indicator_storage_dict["distance_to_provincial_highway"] = village_gdf["dist_prov_road"]
+        indicator_storage_dict["school_density_per_area"] = village_gdf["school_count"] / village_gdf["total_village_area"]
+        indicator_storage_dict["clinic_density_per_area"] = village_gdf["clinic_count"] / village_gdf["total_village_area"]
 
-        return pd.DataFrame(indicators, index=village_gdf.index)
+        return pd.DataFrame(indicator_storage_dict, index=village_gdf.index)
 
-    def _zonal_stats(self, gdf, raster, transform, stat="mean"):
-        """计算矢量区域内的栅格统计值"""
+    def _compute_zonal_statistic(self, geodataframe, raster_grid, raster_transform, stat_method="mean"):
+        """Calculate aggregate raster statistics within each vector polygon zone"""
         from rasterio.mask import mask
-        results = []
-        for _, row in tqdm(gdf.iterrows(), desc="Zonal stats"):
-            geom = [row["geometry"].__geo_interface__]
-            out_image, out_transform = mask(rasterio.open(raster), geom, crop=True)
-            data = out_image[0]
-            data = data[data != raster.nodata]
-            if stat == "mean":
-                results.append(np.mean(data) if len(data) > 0 else np.nan)
-            elif stat == "sum":
-                results.append(np.sum(data) if len(data) > 0 else np.nan)
-        return results
+        zone_stat_output_list = []
+        for _, row_record in tqdm(geodataframe.iterrows(), desc="Calculating Zonal Statistics"):
+            polygon_geojson = [row_record["geometry"].__geo_interface__]
+            clipped_raster_array, _ = mask(rasterio.open(raster_grid), polygon_geojson, crop=True)
+            valid_pixel_values = clipped_raster_array[0]
+            valid_pixel_values = valid_pixel_values[valid_pixel_values != raster_grid.nodata]
 
-    def _calc_slope(self, dem, transform):
-        """从DEM计算坡度"""
-        from rasterio.enums import Resampling
-        # 简化计算：使用numpy梯度
-        dy, dx = np.gradient(dem, transform[4], transform[0])  # pixel size
-        slope = np.arctan(np.sqrt(dx**2 + dy**2)) * 180 / np.pi
-        return slope
+            if len(valid_pixel_values) == 0:
+                zone_stat_output_list.append(np.nan)
+            elif stat_method == "mean":
+                zone_stat_output_list.append(np.mean(valid_pixel_values))
+            elif stat_method == "sum":
+                zone_stat_output_list.append(np.sum(valid_pixel_values))
+        return zone_stat_output_list
+
+    def _generate_slope_raster(self, dem_grid, raster_transform):
+        """Derive terrain slope grid from input DEM elevation raster"""
+        # Simplified gradient calculation using numpy differential operator
+        vertical_gradient, horizontal_gradient = np.gradient(
+            dem_grid,
+            raster_transform[4],
+            raster_transform[0]
+        )
+        slope_degree_grid = np.arctan(np.sqrt(horizontal_gradient ** 2 + vertical_gradient ** 2)) * 180 / np.pi
+        return slope_degree_grid
 
 
-def main_preprocessing():
-    """预处理主流程"""
-    mapper = DasymetricMapper()
-    mapper.load_ancillary_rasters()
+def execute_full_preprocessing_pipeline():
+    """Main execution workflow for entire geospatial preprocessing module"""
+    dasymetric_tool = DasymetricMapper()
+    dasymetric_tool.load_ancillary_raster_datasets()
 
-    # 加载村级边界
-    villages = gpd.read_file("data/raw/hunan_villages_1990_2005_2020.gpkg")
+    # Import raw village administrative boundary layer
+    village_boundary_dataset = gpd.read_file("data/raw/hunan_villages_1990_2005_2020.gpkg")
 
-    # Dasymetric mapping
-    villages = mapper.disaggregate_county_to_village(
-        "data/raw/hunan_gdp_county.csv",
-        "data/raw/hunan_pop_county.csv",
-        villages
+    # Run dasymetric disaggregation workflow
+    village_boundary_dataset = dasymetric_tool.disaggregate_county_statistics_to_villages(
+        county_gdp_csv_path="data/raw/hunan_gdp_county.csv",
+        county_pop_csv_path="data/raw/hunan_pop_county.csv",
+        village_boundary_gdf=village_boundary_dataset
     )
 
-    # 构建19指标
-    indicators = mapper.build_19_indicator_system(
-        villages,
-        "data/raw/hunan_dem_30m.tif",
-        "data/raw/hunan_roads.tif",
-        "data/raw/hunan_rivers.tif"
+    # Construct full 19-dimensional indicator dataset
+    integrated_indicator_table = dasymetric_tool.construct_nineteen_indicator_system(
+        village_gdf=village_boundary_dataset,
+        dem_file_path="data/raw/hunan_dem_30m.tif",
+        road_raster_path="data/raw/hunan_roads.tif",
+        river_raster_path="data/raw/hunan_rivers.tif"
     )
 
-    # 合并
-    villages = pd.concat([villages, indicators], axis=1)
-    villages.to_file("data/processed/villages_with_indicators.gpkg", driver="GPKG")
-    print(f"✅ 预处理完成: {len(villages)} 个村庄, 19个指标")
+    # Merge geospatial boundaries with computed indicator attributes
+    final_village_dataset = pd.concat([village_boundary_dataset, integrated_indicator_table], axis=1)
+    final_village_dataset.to_file("data/processed/villages_with_indicators.gpkg", driver="GPKG")
+    print(f"✅ Preprocessing pipeline finished successfully: {len(final_village_dataset)} village units with 19 integrated indicators")
 
 
 if __name__ == "__main__":
-    main_preprocessing()
+    execute_full_preprocessing_pipeline()

@@ -1,6 +1,6 @@
 """
-Module 1: Delta-Index Coupling (DIC) — 变化敏感的复合指标
-基于传统景观指标 + 时间导数构建
+Module 1: Delta-Index Coupling (DIC) — Change-Sensitive Composite Index
+Constructed based on traditional landscape metrics plus temporal derivatives
 ^[5]^
 """
 
@@ -13,139 +13,140 @@ from tqdm import tqdm
 
 class DeltaIndexCoupling:
     """
-    DIC模块：计算ΔPD, ΔAI, ΔCONN, ΔFRAC，然后用Jenks Natural Breaks分类
+    DIC Module: Calculate ΔPD, ΔAI, ΔCONN, ΔFRAC, then perform classification via Jenks Natural Breaks
     """
 
     def __init__(self, time_points=[1990, 2005, 2020]):
         self.time_points = time_points
 
-    def compute_landscape_metrics(self, settlements_gdf, time_col="year"):
+    def compute_landscape_metrics(self, settlements_gdf, time_column="year"):
         """
-        计算传统景观指标：PD(斑块密度), AI(聚集度), CONN(连通性), FRAC(分形维数)
+        Calculate conventional landscape metrics: PD (Patch Density), AI (Aggregation Index),
+        CONN (Connectivity), FRAC (Fractal Dimension)
         """
-        metrics = {}
+        metric_records = {}
 
-        for t in self.time_points:
-            subset = settlements_gdf[settlements_gdf[time_col] == t]
+        for year in self.time_points:
+            temporal_subset = settlements_gdf[settlements_gdf[settlements_gdf[time_column]] == year]
 
             # Patch Density (PD)
-            total_area = subset["geometry"].area.sum()
-            n_patches = len(subset)
-            metrics[f"PD_{t}"] = n_patches / (total_area / 1e6)  # per km²
+            total_surface_area = temporal_subset["geometry"].area.sum()
+            patch_count = len(temporal_subset)
+            metric_records[f"PD_{year}"] = patch_count / (total_surface_area / 10**6)  # Unit: per square kilometer
 
-            # Aggregation Index (AI) — 简化版
-            metrics[f"AI_{t}"] = subset["ai"].mean() if "ai" in subset.columns else np.nan
+            # Simplified Aggregation Index (AI)
+            metric_records[f"AI_{year}"] = temporal_subset["ai"].mean() if "ai" in temporal_subset.columns else np.nan
 
-            # Connectivity (IIC-based)
-            metrics[f"CONN_{t}"] = subset["connectivity"].mean() if "connectivity" in subset.columns else np.nan
+            # IIC-based Connectivity Metric
+            metric_records[f"CONN_{year}"] = temporal_subset["connectivity"].mean() if "connectivity" in temporal_subset.columns else np.nan
 
-            # Fractal Dimension
-            metrics[f"FRAC_{t}"] = subset["fractal_dim"].mean() if "fractal_dim" in subset.columns else np.nan
+            # Mean Fractal Dimension
+            metric_records[f"FRAC_{year}"] = temporal_subset["fractal_dim"].mean() if "fractal_dim" in temporal_subset.columns else np.nan
 
-        return pd.DataFrame(metrics)
+        return pd.DataFrame(metric_records)
 
-    def compute_delta_indices(self, metrics_df):
+    def compute_delta_metrics(self, landscape_metric_df):
         """
-        计算Delta指标：ΔPD, ΔAI, ΔCONN, ΔFRAC
-        
+        Compute delta change metrics: ΔPD, ΔAI, ΔCONN, ΔFRAC
         """
-        deltas = {}
+        delta_records = {}
 
-        # ΔPD = PD_2020 - PD_1990 (也计算中间段)
-        deltas["ΔPD_90_05"] = metrics_df["PD_2005"] - metrics_df["PD_1990"]
-        deltas["ΔPD_05_20"] = metrics_df["PD_2020"] - metrics_df["PD_2005"]
-        deltas["ΔPD_total"] = metrics_df["PD_2020"] - metrics_df["PD_1990"]
+        # ΔPD = PD value difference between two time stages (inter-period and total temporal change)
+        delta_records["ΔPD_90_05"] = landscape_metric_df["PD_2005"] - landscape_metric_df["PD_1990"]
+        delta_records["ΔPD_05_20"] = landscape_metric_df["PD_2020"] - landscape_metric_df["PD_2005"]
+        delta_records["ΔPD_total"] = landscape_metric_df["PD_2020"] - landscape_metric_df["PD_1990"]
 
-        deltas["ΔAI_90_05"] = metrics_df["AI_2005"] - metrics_df["AI_1990"]
-        deltas["ΔAI_05_20"] = metrics_df["AI_2020"] - metrics_df["AI_2005"]
-        deltas["ΔAI_total"] = metrics_df["AI_2020"] - metrics_df["AI_1990"]
+        delta_records["ΔAI_90_05"] = landscape_metric_df["AI_2005"] - landscape_metric_df["AI_1990"]
+        delta_records["ΔAI_05_20"] = landscape_metric_df["AI_2020"] - landscape_metric_df["AI_2005"]
+        delta_records["ΔAI_total"] = landscape_metric_df["AI_2020"] - landscape_metric_df["AI_1990"]
 
-        deltas["ΔCONN_90_05"] = metrics_df["CONN_2005"] - metrics_df["CONN_1990"]
-        deltas["ΔCONN_05_20"] = metrics_df["CONN_2020"] - metrics_df["CONN_2005"]
-        deltas["ΔCONN_total"] = metrics_df["CONN_2020"] - metrics_df["CONN_1990"]
+        delta_records["ΔCONN_90_05"] = landscape_metric_df["CONN_2005"] - landscape_metric_df["CONN_1990"]
+        delta_records["ΔCONN_05_20"] = landscape_metric_df["CONN_2020"] - landscape_metric_df["CONN_2005"]
+        delta_records["ΔCONN_total"] = landscape_metric_df["CONN_2020"] - landscape_metric_df["CONN_1990"]
 
-        deltas["ΔFRAC_90_05"] = metrics_df["FRAC_2005"] - metrics_df["FRAC_1990"]
-        deltas["ΔFRAC_05_20"] = metrics_df["FRAC_2020"] - metrics_df["FRAC_2005"]
-        deltas["ΔFRAC_total"] = metrics_df["FRAC_2020"] - metrics_df["FRAC_1990"]
+        delta_records["ΔFRAC_90_05"] = landscape_metric_df["FRAC_2005"] - landscape_metric_df["FRAC_1990"]
+        delta_records["ΔFRAC_05_20"] = landscape_metric_df["FRAC_2020"] - landscape_metric_df["FRAC_2005"]
+        delta_records["ΔFRAC_total"] = landscape_metric_df["FRAC_2020"] - landscape_metric_df["FRAC_1990"]
 
-        return pd.DataFrame(deltas)
+        return pd.DataFrame(delta_records)
 
-    def jenks_classify(self, deltas_df, n_classes=4):
+    def jenks_natural_break_classification(self, delta_metric_df, class_number=4):
         """
-        Jenks Natural Breaks分类为4种演化类型
+        Classify spatial units into 4 evolutionary types using Jenks Natural Breaks algorithm
         ^[6]^
-        
-        Type | ΔPD | ΔAI | ΔCONN | Interpretation
-        T1: Aggregation-Intensive | ↓↓ | ↑↑ | ↑↑ | Villages consolidating
-        T2: Fragmentation-Dominant | ↑↑ | ↓↓ | ↓↓ | Villages splitting
-        T3: Expansion-Driven | ↑ | ↓ | ↑ | Physical expansion
-        T4: Stable-Equilibrium | ≈0 | ≈0 | ≈0 | Minimal change
+
+        Evolution Type | ΔPD | ΔAI | ΔCONN | Semantic Interpretation
+        T1: Aggregation-Intensive | Sharp Decline | Sharp Rise | Sharp Rise | Rural settlement consolidation
+        T2: Fragmentation-Dominant | Sharp Rise | Sharp Decline | Sharp Decline | Severe village patch splitting
+        T3: Expansion-Driven | Moderate Rise | Moderate Decline | Moderate Rise | Physical outward expansion of settlements
+        T4: Stable-Equilibrium | Near zero | Near zero | Near zero | Negligible landscape structural changes
         """
         from jenkspy import jenks_breaks
 
-        # 使用ΔPD, ΔAI, ΔCONN三个指标进行分类
-        features = deltas_df[["ΔPD_total", "ΔAI_total", "ΔCONN_total"]].values
+        # Input feature matrix based on total change metrics ΔPD_total, ΔAI_total, ΔCONN_total
+        feature_matrix = delta_metric_df[["ΔPD_total", "ΔAI_total", "ΔCONN_total"]].values
 
-        # 逐列Jenks breaks
-        breaks_pd = jenks_breaks(features[:, 0], nb_class=n_classes)
-        breaks_ai = jenks_breaks(features[:, 1], nb_class=n_classes)
-        breaks_conn = jenks_breaks(features[:, 2], nb_class=n_classes)
+        # Generate Jenks break thresholds for each metric column separately
+        pd_break_points = jenks_breaks(feature_matrix[:, 0], nb_class=class_number)
+        ai_break_points = jenks_breaks(feature_matrix[:, 1], nb_class=class_number)
+        conn_break_points = jenks_breaks(feature_matrix[:, 2], nb_class=class_number)
 
-        # 分类逻辑
-        def classify(row):
-            pd, ai, conn = row["ΔPD_total"], row["ΔAI_total"], row["ΔCONN_total"]
+        # Classification rule function for each spatial unit row
+        def assign_evolution_category(row_data):
+            pd_value, ai_value, conn_value = row_data["ΔPD_total"], row_data["ΔAI_total"], row_data["ΔCONN_total"]
 
-            pd_class = np.digitize([pd], breaks_pd)[0]
-            ai_class = np.digitize([ai], breaks_ai)[0]
-            conn_class = np.digitize([conn], breaks_conn)[0]
+            pd_category = np.digitize([pd_value], pd_break_points)[0]
+            ai_category = np.digitize([ai_value], ai_break_points)[0]
+            conn_category = np.digitize([conn_value], conn_break_points)[0]
 
-            # T1: PD↓↓(0), AI↑↑(3), CONN↑↑(3)
-            if pd_class <= 1 and ai_class >= 2 and conn_class >= 2:
+            # T1: Extremely low PD, extremely high AI & CONN
+            if pd_category <= 1 and ai_category >= 2 and conn_category >= 2:
                 return "T1: Aggregation-Intensive"
-            # T2: PD↑↑(3), AI↓↓(0), CONN↓↓(0)
-            elif pd_class >= 2 and ai_class <= 1 and conn_class <= 1:
+            # T2: Extremely high PD, extremely low AI & CONN
+            elif pd_category >= 2 and ai_category <= 1 and conn_category <= 1:
                 return "T2: Fragmentation-Dominant"
-            # T3: PD↑(2), AI↓(1), CONN↑(2)
-            elif pd_class == 2 and ai_class == 1 and conn_class == 2:
+            # T3: Moderate PD growth, slight AI decline, moderate CONN growth
+            elif pd_category == 2 and ai_category == 1 and conn_category == 2:
                 return "T3: Expansion-Driven"
-            # T4: all ≈0
+            # T4: All metrics show trivial fluctuation near zero
             else:
                 return "T4: Stable-Equilibrium"
 
-        deltas_df["evolution_type"] = deltas_df.apply(classify, axis=1)
-        return deltas_df
+        delta_metric_df["evolution_type"] = delta_metric_df.apply(assign_evolution_category, axis=1)
+        return delta_metric_df
 
-    def run(self, settlements_gdf):
-        """运行完整DIC流程"""
-        print("📊 Running Delta-Index Coupling (DIC)...")
+    def execute_full_dic_workflow(self, settlements_gdf):
+        """Execute the complete Delta-Index Coupling computational pipeline"""
+        print("📊 Running Delta-Index Coupling (DIC) Workflow...")
 
-        metrics = self.compute_landscape_metrics(settlements_gdf)
-        deltas = self.compute_delta_indices(metrics)
-        classified = self.jenks_classify(deltas)
+        landscape_metrics_output = self.compute_landscape_metrics(settlements_gdf)
+        delta_metrics_output = self.compute_delta_metrics(landscape_metrics_output)
+        classified_delta_results = self.jenks_natural_break_classification(delta_metrics_output)
 
-        # 合并回原始数据
-        result = settlements_gdf.merge(classified, left_index=True, right_index=True)
+        # Merge computed metrics and classification labels back to original geospatial dataset
+        final_output_gdf = settlements_gdf.merge(classified_delta_results, left_index=True, right_index=True)
 
-        # 统计各类型数量
-        type_counts = result["evolution_type"].value_counts()
-        print("\n📈 DIC Classification Results:")
-        for t, n in type_counts.items():
-            print(f"  {t}: {n} villages ({n/len(result)*100:.1f}%)")
+        # Count sample quantity and proportion for each evolutionary type
+        type_statistics = final_output_gdf["evolution_type"].value_counts()
+        print("\n📈 DIC Evolution Classification Summary Statistics:")
+        for category_label, sample_count in type_statistics.items():
+            proportion_pct = sample_count / len(final_output_gdf) * 100
+            print(f"  {category_label}: {sample_count} villages ({proportion_pct:.1f}%)")
 
-        # 关键发现：东西部连通性差异
-        dongting = result[result["region"] == "Dongting Lake plain"]
-        wuling = result[result["region"] == "Wuling Mountains"]
+        # Core regional comparative analysis: connectivity disparity between two geographical zones
+        dongting_plain_subset = final_output_gdf[final_output_gdf["region"] == "Dongting Lake plain"]
+        wuling_mountain_subset = final_output_gdf[final_output_gdf["region"] == "Wuling Mountains"]
 
-        print(f"\n🔗 Connectivity Dynamics:")
-        print(f"  Dongting Lake plain: ΔCONN = {dongting['ΔCONN_total'].mean():+.2f}")
-        print(f"  Wuling Mountains: ΔCONN = {wuling['ΔCONN_total'].mean():+.2f}")
+        print(f"\n🔗 Inter-Regional Connectivity Change Comparison:")
+        print(f"  Dongting Lake plain: Mean total ΔCONN = {dongting_plain_subset['ΔCONN_total'].mean():+.2f}")
+        print(f"  Wuling Mountains: Mean total ΔCONN = {wuling_mountain_subset['ΔCONN_total'].mean():+.2f}")
         print(f"  ")
 
-        return result
+        return final_output_gdf
 
 
 if __name__ == "__main__":
-    villages = gpd.read_file("data/processed/villages_with_indicators.gpkg")
-    dic = DeltaIndexCoupling()
-    dic_result = dic.run(villages)
-    dic_result.to_file("data/processed/dic_results.gpkg", driver="GPKG")
+    village_geodata = gpd.read_file("data/processed/villages_with_indicators.gpkg")
+    dic_model = DeltaIndexCoupling()
+    dic_calculation_results = dic_model.execute_full_dic_workflow(village_geodata)
+    dic_calculation_results.to_file("data/processed/dic_results.gpkg", driver="GPKG")
